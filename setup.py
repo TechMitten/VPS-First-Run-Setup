@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Ubuntu 24.04 Server Setup Script (RESUMABLE)
-============================================
+Ubuntu 24.04 Server Setup Script (FULLY RESUMABLE)
+==================================================
 Run as root: sudo python3 setup.py
 
-This script is idempotent - you can safely re-run it if a step fails.
-Completed steps will be skipped automatically.
+This script is fully idempotent - it detects completed steps and skips them.
+If your setup failed mid-way, just re-run the script.
 """
 
 import subprocess
@@ -36,7 +36,6 @@ def run_cmd(cmd, check=True, capture=False, input_text=None):
     try:
         if not capture:
             print(f"  → {cmd}")
-            
         result = subprocess.run(
             cmd,
             shell=True,
@@ -53,22 +52,41 @@ def run_cmd(cmd, check=True, capture=False, input_text=None):
         return e
 
 def check_root():
-    """Ensure script runs as root"""
     if os.geteuid() != 0:
         print("❌ This script must be run as root!")
         sys.exit(1)
 
 def check_ubuntu():
-    """Verify Ubuntu 24.04"""
     version = run_cmd("lsb_release -rs", capture=True).stdout.strip()
     if version != "24.04":
         print(f"⚠️  Expected Ubuntu 24.04, found {version}")
         if input("Continue anyway? (yes/no): ").lower() != "yes":
             sys.exit(1)
 
-def get_username():
-    """Prompt for new sudo username (only if not resuming existing)"""
+def get_existing_sudo_users():
+    """Get list of existing sudo users"""
+    result = run_cmd("getent group sudo | cut -d: -f4", capture=True)
+    return result.stdout.strip().split(',') if result.stdout.strip() else []
+
+def prompt_username():
+    """Smart username prompt - detects existing users"""
     global NEW_USER
+    existing_users = get_existing_sudo_users()
+    
+    if existing_users and existing_users != ['']:
+        print(f"\n📝 Found existing sudo users: {', '.join(existing_users)}")
+        use_existing = input("Use existing user for setup? (yes/no): ").lower()
+        
+        if use_existing == "yes":
+            while True:
+                user = input("Enter existing username: ").strip().lower()
+                if user in existing_users:
+                    NEW_USER = user
+                    print(f"  → Using existing user: {NEW_USER}")
+                    return
+                print("❌ User not found or not in sudo group")
+    
+    # No existing users or user chose to create new
     while True:
         user = input("New sudo username: ").strip().lower()
         if user.isalnum() and len(user) <= 32:
@@ -77,36 +95,28 @@ def get_username():
         print("❌ Use lowercase alphanumeric, max 32 chars")
 
 def user_exists():
-    """Check if user already exists"""
     return run_cmd(f"id {NEW_USER}", check=False, capture=True).returncode == 0
 
 def ssh_key_exists():
-    """Check if SSH key is already configured"""
     auth_file = f"/home/{NEW_USER}/.ssh/authorized_keys"
     return os.path.exists(auth_file) and os.path.getsize(auth_file) > 0
 
 def is_ssh_hardened():
-    """Check if SSH is already hardened"""
     return run_cmd("grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config", check=False).returncode == 0
 
 def is_fail2ban_active():
-    """Check if Fail2Ban is installed and active"""
     return run_cmd("systemctl is-active fail2ban", check=False, capture=True).returncode == 0
 
 def is_docker_installed():
-    """Check if Docker is installed"""
     return run_cmd("docker --version", check=False, capture=True).returncode == 0
 
 def is_npm_running():
-    """Check if Nginx Proxy Manager container is running"""
     return run_cmd("docker ps | grep -q nginx-proxy-manager", check=False).returncode == 0
 
 def is_ufw_active():
-    """Check if UFW firewall is active"""
     return run_cmd("ufw status | grep -q 'Status: active'", check=False).returncode == 0
 
 def get_password():
-    """Prompt for new user password"""
     while True:
         pwd = getpass.getpass(f"Password for {NEW_USER}: ")
         if len(pwd) < 8:
@@ -118,7 +128,6 @@ def get_password():
         print("❌ Passwords don't match")
 
 def update_system():
-    """Update and upgrade packages (always runs)"""
     print("\n📦 Updating System...")
     run_cmd("apt update")
     run_cmd("apt upgrade -y")
@@ -126,30 +135,28 @@ def update_system():
     print("✅ System updated")
 
 def create_user():
-    """Create sudo user (skipped if exists)"""
-    print(f"\n👤 Creating User: {NEW_USER}")
+    print(f"\n👤 User Setup: {NEW_USER}")
     
     if user_exists():
-        print(f"  → User {NEW_USER} already exists, skipping creation.")
-        return
-    
-    pwd = get_password()
-    run_cmd(f"useradd -m -s /bin/bash {NEW_USER}")
-    run_cmd(f"echo '{NEW_USER}:{pwd}' | chpasswd")
-    run_cmd(f"usermod -aG sudo {NEW_USER}")
-    print(f"✅ User {NEW_USER} created")
+        print(f"  → User already exists, skipping creation.")
+        # Ensure user is in sudo group
+        run_cmd(f"usermod -aG sudo {NEW_USER}", check=False)
+    else:
+        pwd = get_password()
+        run_cmd(f"useradd -m -s /bin/bash {NEW_USER}")
+        run_cmd(f"echo '{NEW_USER}:{pwd}' | chpasswd")
+        run_cmd(f"usermod -aG sudo {NEW_USER}")
+        print(f"✅ User {NEW_USER} created")
 
 def setup_ssh():
-    """Configure SSH keys (skipped if exists)"""
-    print("\n🔐 Setting up SSH Keys")
+    print("\n🔐 SSH Key Setup")
     
     if ssh_key_exists():
-        print(f"  → SSH key already exists for {NEW_USER}, skipping.")
+        print(f"  → SSH key already exists, skipping.")
         return
     
     ssh_dir = f"/home/{NEW_USER}/.ssh"
     auth_file = f"{ssh_dir}/authorized_keys"
-    
     os.makedirs(ssh_dir, exist_ok=True)
     
     print("Paste your SSH public key (Ctrl+D when done):")
@@ -165,7 +172,6 @@ def setup_ssh():
     
     if not pub_key:
         print("❌ No key provided! You WILL be locked out!")
-        print("Please re-run the script and provide a key!")
         sys.exit(1)
     
     with open(auth_file, 'w') as f:
@@ -177,10 +183,9 @@ def setup_ssh():
     print("✅ SSH key configured")
 
 def verify_ssh_login():
-    """Verify SSH access (skipped if already hardened)"""
     if is_ssh_hardened():
-        print("\n🧪 SSH already hardened, skipping verification prompt.")
-        print(f"   Ensure you can login: ssh {NEW_USER}@your-server-ip")
+        print("\n🧪 SSH already hardened, skipping verification.")
+        print(f"   Test login with: ssh {NEW_USER}@your-server-ip")
         return
     
     print("\n🧪 VERIFY SSH ACCESS NOW!")
@@ -190,17 +195,11 @@ def verify_ssh_login():
     input("Press Enter when verified...")
 
 def get_ssh_service_name():
-    """Detect correct SSH service name"""
     if run_cmd("systemctl list-units --type=service | grep -q '^ssh.service'", check=False).returncode == 0:
         return "ssh"
-    elif run_cmd("systemctl list-units --type=service | grep -q '^sshd.service'", check=False).returncode == 0:
-        return "sshd"
-    else:
-        print("⚠️  Could not detect SSH service name, defaulting to 'ssh'")
-        return "ssh"
+    return "sshd"
 
 def harden_ssh():
-    """Disable root login & password auth (skipped if hardened)"""
     if is_ssh_hardened():
         print("\n🔒 SSH already hardened, skipping.")
         return
@@ -209,13 +208,11 @@ def harden_ssh():
     
     sshd_config = "/etc/ssh/sshd_config"
     backup = f"{sshd_config}.backup.{int(time.time())}"
-    
     shutil.copy2(sshd_config, backup)
     
     with open(sshd_config, 'r') as f:
         lines = f.readlines()
     
-    # Settings to enforce
     settings = {
         "PermitRootLogin": "no",
         "PasswordAuthentication": "no",
@@ -230,7 +227,6 @@ def harden_ssh():
         "AllowUsers": NEW_USER
     }
     
-    # Update existing lines
     new_config = []
     for line in lines:
         if line.strip() and not line.strip().startswith('#'):
@@ -241,7 +237,6 @@ def harden_ssh():
                 continue
         new_config.append(line)
     
-    # Add remaining settings
     for k, v in settings.items():
         new_config.append(f"{k} {v}\n")
     
@@ -249,19 +244,16 @@ def harden_ssh():
         f.writelines(new_config)
     
     ssh_service = get_ssh_service_name()
-    print(f"  → Detected SSH service: {ssh_service}")
     run_cmd("sshd -t")
     run_cmd(f"systemctl restart {ssh_service}")
     print("✅ SSH hardened")
 
 def install_fail2ban():
-    """Install Fail2Ban (skipped if active)"""
     if is_fail2ban_active():
         print("\n🛡️  Fail2Ban already active, skipping.")
         return
     
     print("\n🛡️  Installing Fail2Ban...")
-    
     run_cmd("apt install -y fail2ban")
     
     config = f"""[DEFAULT]
@@ -281,13 +273,13 @@ enabled = true
     print("✅ Fail2Ban active")
 
 def install_docker():
-    """Install Docker & Docker Compose (skipped if installed)"""
     if is_docker_installed():
         print("\n🐳 Docker already installed, skipping.")
+        # Ensure user is in docker group
+        run_cmd(f"usermod -aG docker {NEW_USER}", check=False)
         return
     
     print("\n🐳 Installing Docker...")
-    
     run_cmd("apt remove -y docker.io docker-doc docker-compose", check=False)
     run_cmd("apt install -y ca-certificates curl gnupg")
     run_cmd("install -m 0755 -d /etc/apt/keyrings")
@@ -304,17 +296,14 @@ def install_docker():
     run_cmd("systemctl enable docker")
     run_cmd("systemctl start docker")
     run_cmd(f"usermod -aG docker {NEW_USER}")
-    
     print("✅ Docker installed")
 
 def install_npm():
-    """Install Nginx Proxy Manager (skipped if running)"""
     if is_npm_running():
         print("\n🌐 Nginx Proxy Manager already running, skipping.")
         return
     
     print("\n🌐 Installing Nginx Proxy Manager...")
-    
     npm_dir = "/opt/nginx-proxy-manager"
     os.makedirs(npm_dir, exist_ok=True)
     
@@ -333,13 +322,11 @@ def install_npm():
     print("  ⚠️  CHANGE DEFAULT PASSWORD IMMEDIATELY!")
 
 def setup_firewall():
-    """Configure UFW (skipped if active)"""
     if is_ufw_active():
         print("\n🔥 UFW firewall already active, skipping.")
         return
     
     print("\n🔥 Setting up Firewall...")
-    
     run_cmd("apt install -y ufw")
     run_cmd("ufw default deny incoming")
     run_cmd("ufw default allow outgoing")
@@ -353,22 +340,20 @@ def setup_firewall():
     run_cmd("ufw status")
 
 def main():
-    """Main execution with resume capability"""
     print(__doc__)
-    
     check_root()
     check_ubuntu()
     
     if input("\nStart setup? (yes/no): ").lower() != "yes":
         sys.exit(0)
     
-    get_username()
+    prompt_username()
     
     # Execute setup (each step checks if already done)
     update_system()
     create_user()
     setup_ssh()
-    verify_ssh_login()  # Only prompts if not hardened yet
+    verify_ssh_login()
     harden_ssh()
     install_fail2ban()
     install_docker()
