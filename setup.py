@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
 """
-Ubuntu 24.04 Server Setup Script
-================================
-A single-file automation script for initial Ubuntu 24.04 server hardening and setup.
+Ubuntu 24.04 Server Setup Script (FIXED)
+=======================================
 Run as root: sudo python3 setup.py
-
-What this script does:
-✓ Updates system packages
-✓ Creates a new sudo user
-✓ Disables root login & password authentication (SSH)
-✓ Installs & configures Fail2Ban
-✓ Installs Docker & Docker Compose
-✓ Deploys Nginx Proxy Manager
-✓ Configures UFW firewall
-
-⚠️  WARNING: This will modify SSH settings. Ensure you have console access!
 """
 
 import subprocess
@@ -24,10 +12,8 @@ import getpass
 import shutil
 import time
 
-# Global configuration
 NEW_USER = ""
 
-# Docker Compose for Nginx Proxy Manager
 NPM_COMPOSE = """version: '3.8'
 services:
   app:
@@ -111,7 +97,6 @@ def create_user():
     """Create sudo user"""
     print(f"\n👤 Creating User: {NEW_USER}")
     
-    # Check if user exists
     if run_cmd(f"id {NEW_USER}", check=False, capture=True).returncode == 0:
         print(f"⚠️  User {NEW_USER} already exists, skipping")
         return
@@ -144,9 +129,8 @@ def setup_ssh():
     
     if not pub_key:
         print("❌ No key provided! You WILL be locked out!")
-        if input("Continue anyway? (yes/no): ").lower() != "yes":
-            sys.exit(1)
-        return
+        print("Please re-run the script and provide a key!")
+        sys.exit(1)
     
     with open(auth_file, 'w') as f:
         f.write(pub_key + "\n")
@@ -163,6 +147,16 @@ def verify_ssh_login():
     print(f"  ssh {NEW_USER}@your-server-ip")
     print("\nIf login succeeds, return here and continue.")
     input("Press Enter when verified...")
+
+def get_ssh_service_name():
+    """Detect correct SSH service name"""
+    if run_cmd("systemctl list-units --type=service | grep -q '^ssh.service'", check=False).returncode == 0:
+        return "ssh"
+    elif run_cmd("systemctl list-units --type=service | grep -q '^sshd.service'", check=False).returncode == 0:
+        return "sshd"
+    else:
+        print("⚠️  Could not detect SSH service name, defaulting to 'ssh'")
+        return "ssh"
 
 def harden_ssh():
     """Disable root login & password auth"""
@@ -211,9 +205,11 @@ def harden_ssh():
     with open(sshd_config, 'w') as f:
         f.writelines(new_config)
     
-    # Test and restart
+    # Test and restart with correct service name
+    ssh_service = get_ssh_service_name()
+    print(f"  → Detected SSH service: {ssh_service}")
     run_cmd("sshd -t")
-    run_cmd("systemctl restart sshd")
+    run_cmd(f"systemctl restart {ssh_service}")
     print("✅ SSH hardened")
 
 def install_fail2ban():
