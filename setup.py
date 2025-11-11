@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Ubuntu 24.04 Server Setup Script (FIXED)
-=======================================
+Ubuntu 24.04 Server Setup Script (RESUMABLE)
+============================================
 Run as root: sudo python3 setup.py
+
+This script is idempotent - you can safely re-run it if a step fails.
+Completed steps will be skipped automatically.
 """
 
 import subprocess
@@ -64,7 +67,7 @@ def check_ubuntu():
             sys.exit(1)
 
 def get_username():
-    """Prompt for new sudo username"""
+    """Prompt for new sudo username (only if not resuming existing)"""
     global NEW_USER
     while True:
         user = input("New sudo username: ").strip().lower()
@@ -72,6 +75,35 @@ def get_username():
             NEW_USER = user
             break
         print("❌ Use lowercase alphanumeric, max 32 chars")
+
+def user_exists():
+    """Check if user already exists"""
+    return run_cmd(f"id {NEW_USER}", check=False, capture=True).returncode == 0
+
+def ssh_key_exists():
+    """Check if SSH key is already configured"""
+    auth_file = f"/home/{NEW_USER}/.ssh/authorized_keys"
+    return os.path.exists(auth_file) and os.path.getsize(auth_file) > 0
+
+def is_ssh_hardened():
+    """Check if SSH is already hardened"""
+    return run_cmd("grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config", check=False).returncode == 0
+
+def is_fail2ban_active():
+    """Check if Fail2Ban is installed and active"""
+    return run_cmd("systemctl is-active fail2ban", check=False, capture=True).returncode == 0
+
+def is_docker_installed():
+    """Check if Docker is installed"""
+    return run_cmd("docker --version", check=False, capture=True).returncode == 0
+
+def is_npm_running():
+    """Check if Nginx Proxy Manager container is running"""
+    return run_cmd("docker ps | grep -q nginx-proxy-manager", check=False).returncode == 0
+
+def is_ufw_active():
+    """Check if UFW firewall is active"""
+    return run_cmd("ufw status | grep -q 'Status: active'", check=False).returncode == 0
 
 def get_password():
     """Prompt for new user password"""
@@ -86,7 +118,7 @@ def get_password():
         print("❌ Passwords don't match")
 
 def update_system():
-    """Update and upgrade packages"""
+    """Update and upgrade packages (always runs)"""
     print("\n📦 Updating System...")
     run_cmd("apt update")
     run_cmd("apt upgrade -y")
@@ -94,11 +126,11 @@ def update_system():
     print("✅ System updated")
 
 def create_user():
-    """Create sudo user"""
+    """Create sudo user (skipped if exists)"""
     print(f"\n👤 Creating User: {NEW_USER}")
     
-    if run_cmd(f"id {NEW_USER}", check=False, capture=True).returncode == 0:
-        print(f"⚠️  User {NEW_USER} already exists, skipping")
+    if user_exists():
+        print(f"  → User {NEW_USER} already exists, skipping creation.")
         return
     
     pwd = get_password()
@@ -108,8 +140,12 @@ def create_user():
     print(f"✅ User {NEW_USER} created")
 
 def setup_ssh():
-    """Configure SSH keys"""
+    """Configure SSH keys (skipped if exists)"""
     print("\n🔐 Setting up SSH Keys")
+    
+    if ssh_key_exists():
+        print(f"  → SSH key already exists for {NEW_USER}, skipping.")
+        return
     
     ssh_dir = f"/home/{NEW_USER}/.ssh"
     auth_file = f"{ssh_dir}/authorized_keys"
@@ -141,7 +177,12 @@ def setup_ssh():
     print("✅ SSH key configured")
 
 def verify_ssh_login():
-    """Verify SSH access before hardening"""
+    """Verify SSH access (skipped if already hardened)"""
+    if is_ssh_hardened():
+        print("\n🧪 SSH already hardened, skipping verification prompt.")
+        print(f"   Ensure you can login: ssh {NEW_USER}@your-server-ip")
+        return
+    
     print("\n🧪 VERIFY SSH ACCESS NOW!")
     print(f"Open a NEW terminal and run:")
     print(f"  ssh {NEW_USER}@your-server-ip")
@@ -159,7 +200,11 @@ def get_ssh_service_name():
         return "ssh"
 
 def harden_ssh():
-    """Disable root login & password auth"""
+    """Disable root login & password auth (skipped if hardened)"""
+    if is_ssh_hardened():
+        print("\n🔒 SSH already hardened, skipping.")
+        return
+    
     print("\n🔒 Hardening SSH...")
     
     sshd_config = "/etc/ssh/sshd_config"
@@ -167,7 +212,6 @@ def harden_ssh():
     
     shutil.copy2(sshd_config, backup)
     
-    # Read config
     with open(sshd_config, 'r') as f:
         lines = f.readlines()
     
@@ -201,11 +245,9 @@ def harden_ssh():
     for k, v in settings.items():
         new_config.append(f"{k} {v}\n")
     
-    # Write back
     with open(sshd_config, 'w') as f:
         f.writelines(new_config)
     
-    # Test and restart with correct service name
     ssh_service = get_ssh_service_name()
     print(f"  → Detected SSH service: {ssh_service}")
     run_cmd("sshd -t")
@@ -213,7 +255,11 @@ def harden_ssh():
     print("✅ SSH hardened")
 
 def install_fail2ban():
-    """Install Fail2Ban"""
+    """Install Fail2Ban (skipped if active)"""
+    if is_fail2ban_active():
+        print("\n🛡️  Fail2Ban already active, skipping.")
+        return
+    
     print("\n🛡️  Installing Fail2Ban...")
     
     run_cmd("apt install -y fail2ban")
@@ -235,13 +281,14 @@ enabled = true
     print("✅ Fail2Ban active")
 
 def install_docker():
-    """Install Docker & Docker Compose"""
+    """Install Docker & Docker Compose (skipped if installed)"""
+    if is_docker_installed():
+        print("\n🐳 Docker already installed, skipping.")
+        return
+    
     print("\n🐳 Installing Docker...")
     
-    # Remove old versions
     run_cmd("apt remove -y docker.io docker-doc docker-compose", check=False)
-    
-    # Add Docker repo
     run_cmd("apt install -y ca-certificates curl gnupg")
     run_cmd("install -m 0755 -d /etc/apt/keyrings")
     run_cmd("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg")
@@ -251,11 +298,9 @@ def install_docker():
     repo = f"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {codename} stable"
     run_cmd(f'echo "{repo}" > /etc/apt/sources.list.d/docker.list')
     
-    # Install
     run_cmd("apt update")
     run_cmd("apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin")
     
-    # Enable
     run_cmd("systemctl enable docker")
     run_cmd("systemctl start docker")
     run_cmd(f"usermod -aG docker {NEW_USER}")
@@ -263,24 +308,22 @@ def install_docker():
     print("✅ Docker installed")
 
 def install_npm():
-    """Install Nginx Proxy Manager"""
+    """Install Nginx Proxy Manager (skipped if running)"""
+    if is_npm_running():
+        print("\n🌐 Nginx Proxy Manager already running, skipping.")
+        return
+    
     print("\n🌐 Installing Nginx Proxy Manager...")
     
     npm_dir = "/opt/nginx-proxy-manager"
     os.makedirs(npm_dir, exist_ok=True)
     
-    # Write compose file
     with open(f"{npm_dir}/docker-compose.yml", 'w') as f:
         f.write(NPM_COMPOSE)
     
-    # Create data dirs
     os.makedirs(f"{npm_dir}/data", exist_ok=True)
     os.makedirs(f"{npm_dir}/letsencrypt", exist_ok=True)
-    
-    # Set ownership
     run_cmd(f"chown -R {NEW_USER}:{NEW_USER} {npm_dir}")
-    
-    # Start service
     run_cmd(f"cd {npm_dir} && docker compose up -d")
     
     print("✅ Nginx Proxy Manager running")
@@ -290,55 +333,48 @@ def install_npm():
     print("  ⚠️  CHANGE DEFAULT PASSWORD IMMEDIATELY!")
 
 def setup_firewall():
-    """Configure UFW"""
+    """Configure UFW (skipped if active)"""
+    if is_ufw_active():
+        print("\n🔥 UFW firewall already active, skipping.")
+        return
+    
     print("\n🔥 Setting up Firewall...")
     
     run_cmd("apt install -y ufw")
     run_cmd("ufw default deny incoming")
     run_cmd("ufw default allow outgoing")
-    
-    # Essential ports
-    run_cmd("ufw allow 22/tcp")   # SSH
-    run_cmd("ufw allow 80/tcp")   # HTTP
-    run_cmd("ufw allow 81/tcp")   # NPM Admin
-    run_cmd("ufw allow 443/tcp")  # HTTPS
-    
-    # Enable UFW
+    run_cmd("ufw allow 22/tcp")
+    run_cmd("ufw allow 80/tcp")
+    run_cmd("ufw allow 81/tcp")
+    run_cmd("ufw allow 443/tcp")
     run_cmd("echo 'y' | ufw enable")
     
     print("✅ Firewall active")
     run_cmd("ufw status")
 
 def main():
-    """Main execution"""
+    """Main execution with resume capability"""
     print(__doc__)
     
-    # Safety checks
     check_root()
     check_ubuntu()
     
     if input("\nStart setup? (yes/no): ").lower() != "yes":
         sys.exit(0)
     
-    # Get configuration
     get_username()
     
-    # Execute setup
+    # Execute setup (each step checks if already done)
     update_system()
     create_user()
     setup_ssh()
-    
-    # Critical verification step
-    verify_ssh_login()
-    
-    # Continue with security hardening
+    verify_ssh_login()  # Only prompts if not hardened yet
     harden_ssh()
     install_fail2ban()
     install_docker()
     install_npm()
     setup_firewall()
     
-    # Final summary
     print("\n" + "="*60)
     print("🎉 SETUP COMPLETE!")
     print("="*60)
